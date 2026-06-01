@@ -1,0 +1,6 @@
+{
+  "name": "CubeSat Sensor Topology Simulator",
+  "description": "An interactive mathematical simulation modeling self-healing distributed sensor networks and resilient sensing architectures for CubeSat systems.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
