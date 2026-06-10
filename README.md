@@ -258,7 +258,7 @@ Supported outputs:
 
 This contains everything you need to run your app locally.
 
-View your simulation in AI Studio: https://ai.studio/apps/7365d160-69da-4bfa-8c96-0de09c7cb3a5
+View your simulation in AI Studio: https://ai.studio/apps/7365d160-69da-4bfa-8c96-0de09c7cb3a5?fullscreenApplet=true
 
 ## Run Locally
 
