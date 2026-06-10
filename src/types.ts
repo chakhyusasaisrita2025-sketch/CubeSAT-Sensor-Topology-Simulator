@@ -17,6 +17,8 @@ export interface SensorNode {
   failureCount: number; // Ticks failed
   assignedComrades: string[]; // Neighbor IDs this node is monitoring/ready to support
   supportingNodes: string[]; // Nodes that are currently expanding to cover this node if it failed
+  remainingEnergy?: number; // 0 to 100%
+  reliabilityHistory?: number; // 0.0 to 1.0
 }
 
 export interface CommunicationEdge {
@@ -36,6 +38,74 @@ export interface MetricsHistoryEntry {
   connectivityRatioSelfHealing: number;
   connectivityRatioConventional: number;
   failuresCount: number;
+  pdrSelfHealing: number;
+  pdrConventional: number;
+  energySelfHealing: number;
+  energyConventional: number;
+  latencySelfHealing: number;
+}
+
+export interface RecoveryEvent {
+  nodeId: string;
+  failureTime: number;
+  detectionTime: number;
+  recoveryTime: number;
+  latency: number;
+}
+
+export interface BenchmarkResult {
+  algorithm: string;
+  connectivity: number;
+  coverage: number;
+  pdr: number;
+  recoveryTime: number;
+  energy: number;
+}
+
+export interface MonteCarloStats {
+  mean: number;
+  median: number;
+  stdDev: number;
+  confIntervalMin: number;
+  confIntervalMax: number;
+  sd: number; // Dashboard expects .sd for Standard Deviation
+  ci: [number, number]; // Dashboard expects .ci as [min, max] array
+}
+
+export interface MonteCarloReport {
+  runsCount: number;
+  totalRuns: number; // Dashboard expects totalRuns
+  connectivity: MonteCarloStats;
+  coverage: MonteCarloStats;
+  pdr: MonteCarloStats;
+  recoveryTime: MonteCarloStats;
+  latency: MonteCarloStats; // Dashboard expects latency instead of recoveryTime
+  energy: MonteCarloStats;
+}
+
+export interface DegradationPoint {
+  damage?: number; // Support dashboard `.damage` key
+  damageLevel: number; // 0 to 90%
+  conventionalConnectivity: number;
+  selfHealingConnectivity: number;
+  conventionalCoverage: number;
+  selfHealingCoverage: number;
+  conventionalPDR: number;
+  selfHealingPDR: number;
+  conventionalEnergy: number;
+  selfHealingEnergy: number;
+  conventionalRecovery: number;
+  selfHealingRecovery: number;
+
+  // Visualizer aliases
+  connectivityConventional?: number;
+  connectivitySelfHealing?: number;
+  coverageConventional?: number;
+  coverageSelfHealing?: number;
+  pdrConventional?: number;
+  pdrSelfHealing?: number;
+  energyConventional?: number;
+  energySelfHealing?: number;
 }
 
 export interface SimulationConfig {
@@ -46,31 +116,5 @@ export interface SimulationConfig {
   redundancyLevel: number; // Number of redundant backup nodes per region
   failureProbability: number; // Random failure rate per step
   autoHealEnabled: boolean;
-}
-
-export interface UserAchievement {
-  id: string;
-  unlockedAt: string;
-}
-
-export interface UserProfile {
-  username: string;
-  callsign: string;
-  level: number;
-  xp: number;
-  achievements: UserAchievement[];
-  customSectorName: string;
-  autoCenterView: boolean;
-  gridOpacity: number;
-  lastLoginAt: string;
-}
-
-export interface AchievementDef {
-  id: string;
-  title: string;
-  description: string;
-  badgeSymbol: string;
-  category: 'onboarding' | 'scenarios' | 'topology' | 'limits';
-  xpReward: number;
 }
 

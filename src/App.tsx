@@ -4,21 +4,25 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { SensorNode, CommunicationEdge, MetricsHistoryEntry, TopologyType, UserProfile } from './types';
+import { SensorNode, CommunicationEdge, MetricsHistoryEntry, TopologyType } from './types';
 import {
   generateNodes,
   generateEdges,
   computeSelfHealing,
   calculateCoveragePersistence,
   CORE_NODE_ID,
+  findRoutingPath,
+  simulatePackets,
+  calculateEnergy,
+  calculateRecoveryLatency,
+  generateDegradationCurves,
+  benchmarkAlgorithms,
+  runMonteCarlo,
 } from './utils/simulationEngine';
 import CubeSatVisualizer from './components/CubeSatVisualizer';
 import CoverageHeatmap from './components/CoverageHeatmap';
 import MetricsDashboard from './components/MetricsDashboard';
 import TheorySection from './components/TheorySection';
-import OnboardingTour from './components/OnboardingTour';
-import UserProfilePanel from './components/UserProfilePanel';
-import { getActiveUser, addXPAndCheckAchievements, ACHIEVEMENT_DEFS } from './utils/achievementEngine';
 import {
   Activity,
   Shuffle,
@@ -31,8 +35,6 @@ import {
   HelpCircle,
   Play,
   Pause,
-  Sparkles,
-  Trophy,
 } from 'lucide-react';
 
 export default function App() {
@@ -51,64 +53,10 @@ export default function App() {
   // Playback/Auto states
   const [isStormActive, setIsStormActive] = useState<boolean>(false);
   const [currentScenario, setCurrentScenario] = useState<string>('Nominal Orbit');
-
-  // User profile & Onboarding states
-  const [activeProfile, setActiveProfile] = useState<UserProfile | null>(() => getActiveUser());
-  const [isTourOpen, setIsTourOpen] = useState<boolean>(false);
-  const [tourStepIndex, setTourStepIndex] = useState<number>(0);
-  const [unlockedToast, setUnlockedToast] = useState<{ title: string; badge: string; xp: number } | null>(null);
-  const [visitedTopologies, setVisitedTopologies] = useState<string[]>(['grid']);
-
-  // Trigger XP and achievements
-  const triggerXPEarned = (xp: number, achievementId?: string) => {
-    if (!activeProfile) return;
-    const { updatedProfile, newlyUnlocked } = addXPAndCheckAchievements(
-      activeProfile,
-      xp,
-      achievementId
-    );
-    setActiveProfile(updatedProfile);
-    if (newlyUnlocked.length > 0) {
-      const ach = newlyUnlocked[0];
-      setUnlockedToast({
-        title: ach.title,
-        badge: ach.badgeSymbol,
-        xp: ach.xpReward,
-      });
-      // automatically remove after 5 seconds
-      setTimeout(() => {
-        setUnlockedToast(null);
-      }, 5000);
-    }
-  };
-
-  // Listen for topology explorations
-  useEffect(() => {
-    if (!activeProfile) return;
-    setVisitedTopologies((prev) => {
-      if (prev.includes(topologyType)) return prev;
-      const next = [...prev, topologyType];
-      if (next.length === 4) {
-        triggerXPEarned(0, 'topology_weaver');
-      }
-      return next;
-    });
-  }, [topologyType, activeProfile]);
-
-  // Listen for sliders at outer limits
-  useEffect(() => {
-    if (!activeProfile) return;
-    if (commRange >= 44) {
-      triggerXPEarned(0, 'limits_max_comm');
-    }
-  }, [commRange, activeProfile]);
-
-  useEffect(() => {
-    if (!activeProfile) return;
-    if (sensingRange >= 16) {
-      triggerXPEarned(0, 'limits_max_sens');
-    }
-  }, [sensingRange, activeProfile]);
+  
+  // Time and automatic simulation clock states
+  const [simulationInterval, setSimulationInterval] = useState<number>(500); // ms per step
+  const [isAutoSimActive, setIsAutoSimActive] = useState<boolean>(false);
 
   // 2. Initialize simulation arrays on parameter changes
   const initSimulation = () => {
@@ -128,6 +76,11 @@ export default function App() {
       connectivityRatioConventional: 100, // all connected initially
       connectivityRatioSelfHealing: 100,
       failuresCount: 0,
+      pdrSelfHealing: 100,
+      pdrConventional: 95,
+      energySelfHealing: 9.2,
+      energyConventional: 9.0,
+      latencySelfHealing: 12
     };
 
     setNodes(rawNodes);
@@ -136,12 +89,38 @@ export default function App() {
     setSelectedNode(null);
     setCurrentScenario('Nominal Orbit');
     setIsStormActive(false);
+    setIsAutoSimActive(false);
   };
 
   // Run initial build on mount or topology change
   useEffect(() => {
     initSimulation();
   }, [topologyType, commRange, sensingRange]);
+
+  // Background clock for automated simulation
+  useEffect(() => {
+    if (!isAutoSimActive) return;
+    const tickInterval = setInterval(() => {
+      setNodes((prevNodes) => {
+        const activeSensors = prevNodes.filter((n) => n.id !== CORE_NODE_ID && n.state !== 'failed');
+        if (activeSensors.length === 0) {
+          setIsAutoSimActive(false);
+          return prevNodes;
+        }
+
+        // Pick dynamic random active node and fail it
+        const targetIdx = Math.floor(Math.random() * activeSensors.length);
+        const selected = activeSensors[targetIdx];
+        const updated = prevNodes.map((n) =>
+          n.id === selected.id ? { ...n, state: 'failed' as const } : n
+        );
+
+        setTimeout(() => recordHistoryStep(updated), 10);
+        return updated;
+      });
+    }, simulationInterval);
+    return () => clearInterval(tickInterval);
+  }, [isAutoSimActive, simulationInterval]);
 
   // Recalculate self-healing loops dynamically whenever nodes/edges change shape
   const healedOutput = useMemo(() => {
@@ -210,19 +189,31 @@ export default function App() {
       healingFactor
     );
 
-    // Calculate conventional connectivity
-    // (conventional routing breaks instantly if a node is severed from the center)
-    const normalActiveCount = currentNodes.filter(n => n.id !== CORE_NODE_ID && n.state !== 'failed').length;
-    
-    // Quick conventional connectedness mock: standard links directly connected
-    const conventionalConnectivity = out.reconnectionRate * 0.72; // drops faster without dynamic routing bypasses
+    // Calculate dynamic physical metrics
+    const packetsSelfHealing = simulatePackets(out.healedNodes, out.healedEdges, 'sqsh', healingFactor, commRange, 80, currentScenario);
+    const packetsConventional = simulatePackets(currentNodes, edges, 'bfs', healingFactor, commRange, 80, currentScenario);
+
+    const energySelfHealing = calculateEnergy(out.healedNodes, out.healedEdges, 'sqsh', healingFactor, commRange, packetsSelfHealing.delivered, packetsSelfHealing.retransmissions);
+    const energyConventional = calculateEnergy(currentNodes, edges, 'bfs', healingFactor, commRange, packetsConventional.delivered, packetsConventional.retransmissions);
+
+    const firstFailed = out.healedNodes.find(n => n.id !== CORE_NODE_ID && n.state === 'failed');
+    const latencySelf = firstFailed
+      ? calculateRecoveryLatency(firstFailed.id, out.healedNodes, healingFactor).latency
+      : 12.0;
 
     const failedCount = currentNodes.filter(n => n.state === 'failed').length;
 
-    // Trigger Resilience Expert achievement if conditions meta
-    if (activeProfile && failedCount >= 6 && persistenceSelfHealing >= 80) {
-      triggerXPEarned(0, 'resilience_expert');
-    }
+    // Direct path connectedness calculation representing traditional unhealed static mesh tree (CSMR)
+    let connectedCountConv = 0;
+    const totalActiveSensors = currentNodes.filter(n => n.id !== CORE_NODE_ID && n.state !== 'failed').length;
+    currentNodes.forEach(n => {
+      if (n.id !== CORE_NODE_ID && n.state !== 'failed') {
+        const path = findRoutingPath(n.id, CORE_NODE_ID, currentNodes, [], 'static', healingFactor, commRange);
+        if (path) connectedCountConv++;
+      }
+    });
+    const connConv = totalActiveSensors > 0 ? (connectedCountConv / totalActiveSensors) * 100 : 100;
+    const conventionalConnectivity = Math.max(0, connConv * (1.0 - failedCount / 50));
 
     setHistory((prev) => {
       const nextStep = prev.length;
@@ -233,8 +224,13 @@ export default function App() {
           coveragePersistenceSelfHealing: persistenceSelfHealing,
           coveragePersistenceConventional: persistenceConventional,
           connectivityRatioSelfHealing: out.reconnectionRate,
-          connectivityRatioConventional: Math.max(0, Math.min(100, failedCount > 0 ? conventionalConnectivity : 100)),
+          connectivityRatioConventional: parseFloat(conventionalConnectivity.toFixed(1)),
           failuresCount: failedCount,
+          pdrSelfHealing: packetsSelfHealing.pdr,
+          pdrConventional: packetsConventional.pdr,
+          energySelfHealing: energySelfHealing.totalEnergy,
+          energyConventional: energyConventional.totalEnergy,
+          latencySelfHealing: latencySelf
         },
       ];
     });
@@ -257,12 +253,9 @@ export default function App() {
   // Scenario 1: Heavy Radiation Storm (simulates massive cascading failures)
   const triggerRadiationStorm = () => {
     initSimulation();
+    setIsAutoSimActive(false);
     setCurrentScenario('Radiation Storm (Solar Flare)');
     setIsStormActive(true);
-
-    if (activeProfile) {
-      triggerXPEarned(0, 'scen_radiation_storm');
-    }
 
     let step = 0;
     const interval = setInterval(() => {
@@ -277,26 +270,29 @@ export default function App() {
         const targetIdx = Math.floor(Math.random() * activeSensors.length);
         const selected = activeSensors[targetIdx];
 
-        const updated = prevNodes.map((n) =>
-          n.id === selected.id ? { ...n, state: 'failed' as const } : n
-        );
+        const updated = prevNodes.map((n) => {
+          if (n.id === selected.id) {
+            return { ...n, state: 'failed' as const };
+          } else if (n.id !== CORE_NODE_ID && n.state !== 'failed') {
+            const newReliability = Math.max(0.35, n.reliability - 0.05);
+            return { ...n, reliability: parseFloat(newReliability.toFixed(3)) };
+          }
+          return n;
+        });
         
         step++;
         recordHistoryStep(updated);
         return updated;
       });
-    }, 450);
+    }, simulationInterval);
   };
 
   // Scenario 2: Micro-Meteorite Debris Impact (cuts diagonal trajectory through surface)
   const triggerDebrisImpact = () => {
     initSimulation();
+    setIsAutoSimActive(false);
     setCurrentScenario('Orbital Debris Penetration');
     setIsStormActive(true);
-
-    if (activeProfile) {
-      triggerXPEarned(0, 'scen_debris_impact');
-    }
 
     // We fail nodes that fall near a physical trajectory line (e.g. y = x)
     let step = 0;
@@ -321,18 +317,15 @@ export default function App() {
         recordHistoryStep(updated);
         return updated;
       });
-    }, 550);
+    }, simulationInterval);
   };
 
   // Scenario 3: Thermal Cycling Overheat (degrades outer face nodes gradually)
   const triggerThermalOverheat = () => {
     initSimulation();
+    setIsAutoSimActive(false);
     setCurrentScenario('Critical Thermal Degradation');
     setIsStormActive(true);
-
-    if (activeProfile) {
-      triggerXPEarned(0, 'scen_thermal_degrade');
-    }
 
     // Gradual damage of outer corner sensors (high coordinates)
     let step = 0;
@@ -360,7 +353,73 @@ export default function App() {
         recordHistoryStep(updated);
         return updated;
       });
-    }, 500);
+    }, simulationInterval);
+  };
+
+  // Trigger specific standard error test case suites (5%, 15%, 30%, 50%)
+  const triggerStandardErrorCase = (level: 'mild' | 'moderate' | 'severe' | 'catastrophic') => {
+    initSimulation();
+    setIsAutoSimActive(false);
+    
+    let targetFailurePct = 0.05;
+    let label = 'Mild Radiation Exposure (5% fail)';
+    if (level === 'moderate') {
+      targetFailurePct = 0.15;
+      label = 'Moderate Radiation Level (15% fail)';
+    } else if (level === 'severe') {
+      targetFailurePct = 0.30;
+      label = 'Severe Ionizing Exposure (30% fail)';
+    } else if (level === 'catastrophic') {
+      targetFailurePct = 0.50;
+      label = 'Catastrophic GCR Storm (50% fail)';
+    }
+
+    setCurrentScenario(label);
+
+    setTimeout(() => {
+      setNodes((prevNodes) => {
+        const sensors = prevNodes.filter(n => n.id !== CORE_NODE_ID);
+        const failCount = Math.round(targetFailurePct * sensors.length);
+        
+        const shuffled = [...sensors].sort(() => Math.random() - 0.5);
+        const victims = new Set(shuffled.slice(0, failCount).map(s => s.id));
+
+        const updated = prevNodes.map(n => 
+          victims.has(n.id) ? { ...n, state: 'failed' as const } : n
+        );
+
+        recordHistoryStep(updated);
+        return updated;
+      });
+    }, 50);
+  };
+
+  // --- SCIENTIFIC DATA COMPILING MATRICES ---
+  const benchmarkResults = useMemo(() => {
+    return benchmarkAlgorithms(nodes, edges, healingFactor, commRange);
+  }, [nodes, edges, healingFactor, commRange]);
+
+  const degradationPoints = useMemo(() => {
+    return generateDegradationCurves(nodes, edges, healingFactor, commRange, currentScenario);
+  }, [nodes, edges, healingFactor, commRange, currentScenario]);
+
+  // Monte Carlo testing suite state
+  const [monteCarloReport, setMonteCarloReport] = useState<any>(null);
+  const [isMonteCarloRunning, setIsMonteCarloRunning] = useState<boolean>(false);
+
+  const handleTriggerMonteCarlo = (runsCount: number) => {
+    setIsMonteCarloRunning(true);
+    setMonteCarloReport(null);
+    setTimeout(() => {
+      try {
+        const report = runMonteCarlo(topologyType, healingFactor, commRange, sensingRange, runsCount, currentScenario);
+        setMonteCarloReport(report);
+      } catch (err) {
+        console.error("Monte Carlo simulations failed", err);
+      } finally {
+        setIsMonteCarloRunning(false);
+      }
+    }, 50);
   };
 
   // Derived evaluation values
@@ -397,48 +456,24 @@ export default function App() {
           </div>
 
           {/* Real-time Scenario HUD Status */}
-          <div className="flex flex-wrap md:flex-nowrap gap-6 md:gap-10 items-center justify-between text-right">
-            <div className="flex gap-8 text-right">
-              <div>
-                <p className="text-[10px] uppercase tracking-widest text-white/40 mb-1 font-mono">Current Orbit State</p>
-                <p className="text-sm font-mono leading-none text-amber-500 font-semibold tracking-tight uppercase select-all">{currentScenario}</p>
-              </div>
-              <div>
-                <p className="text-[10px] uppercase tracking-widest text-white/40 mb-1 font-mono">System Integrity</p>
-                <p className="text-sm font-mono leading-none text-emerald-400 font-semibold">{(100 - failurePercentage).toFixed(2)}%</p>
-              </div>
+          <div className="flex gap-12 text-right">
+            <div>
+              <p className="text-[10px] uppercase tracking-widest text-white/40 mb-1 font-mono">Current Orbit State</p>
+              <p className="text-xl font-mono leading-none text-amber-500 font-semibold tracking-tight uppercase select-all">{currentScenario}</p>
             </div>
-
-            <div className="flex items-center pl-4 border-l border-white/10 gap-3">
-              <UserProfilePanel
-                activeProfile={activeProfile}
-                onProfileChange={(prof) => setActiveProfile(prof)}
-                onOpenTour={() => {
-                  setTourStepIndex(0);
-                  setIsTourOpen(true);
-                }}
-              />
-
+            <div>
+              <p className="text-[10px] uppercase tracking-widest text-white/40 mb-1 font-mono">System Integrity</p>
+              <p className="text-xl font-mono leading-none text-emerald-400 font-semibold">{(100 - failurePercentage).toFixed(2)}%</p>
+            </div>
+            <div className="flex items-center pl-4 border-l border-white/10">
               <button
                 onClick={initSimulation}
-                className="h-10 px-4 border border-[#d4af37]/40 rounded flex items-center justify-center text-[10px] uppercase tracking-wider font-semibold hover:bg-[#d4af37]/20 transition-colors text-[#d4af37] cursor-pointer"
+                className="h-10 px-4 border border-[#d4af37]/40 rounded flex items-center justify-center text-[10px] uppercase tracking-wider font-semibold hover:bg-[#d4af37]/20 transition-colors text-[#d4af37]"
                 title="Reset Simulation"
                 id="top-reset-button"
               >
                 <RotateCcw className="w-3 h-3 mr-1.5" />
                 <span>Full Restart</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setTourStepIndex(0);
-                  setIsTourOpen(true);
-                }}
-                className="h-10 w-10 border border-white/10 rounded flex items-center justify-center text-white/50 hover:text-white hover:bg-white/5 transition-all cursor-pointer"
-                title="Launch Guided Onboarding"
-                id="top-tour-button"
-              >
-                <HelpCircle className="w-4 h-4 text-[#d4af37]" />
               </button>
             </div>
           </div>
@@ -586,6 +621,70 @@ export default function App() {
                 <span className="text-[9px] text-white/30 font-mono block">Power surge factor dynamically allocated to nodes near signal drops.</span>
               </div>
 
+              {/* Slider 4 & Playback Clock: Time Dynamics Control */}
+              <div className="space-y-2 pt-3 border-t border-white/10">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-white/50">Sim Cycle Speed</span>
+                  <span className="font-mono text-white font-bold">{simulationInterval} ms/step</span>
+                </div>
+                <input
+                  type="range"
+                  min="150"
+                  max="2000"
+                  step="50"
+                  value={simulationInterval}
+                  onChange={(e) => setSimulationInterval(Number(e.target.value))}
+                  className="w-full h-1 bg-white/5 hover:bg-white/10 rounded-lg appearance-none cursor-pointer accent-white/50"
+                  id="slider-simulation-interval"
+                />
+                
+                {/* Clock Controls */}
+                <div className="grid grid-cols-3 gap-2 pt-1">
+                  <button
+                    onClick={() => {
+                      if (isStormActive) return;
+                      setIsAutoSimActive(true);
+                    }}
+                    disabled={isAutoSimActive || isStormActive}
+                    className={`h-9 border text-[9px] uppercase font-mono tracking-wider font-semibold rounded flex items-center justify-center gap-1 transition-all ${
+                      isAutoSimActive
+                        ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400'
+                        : 'border-white/10 bg-[#070708]/50 hover:bg-white/5 text-white/60 hover:text-white disabled:opacity-30'
+                    }`}
+                    id="btn-time-play"
+                    title="Start automatic periodic damage injection"
+                  >
+                    <Play className="w-2.5 h-2.5 text-emerald-400 fill-emerald-400" />
+                    <span>Run Play</span>
+                  </button>
+                  <button
+                    onClick={() => setIsAutoSimActive(false)}
+                    disabled={!isAutoSimActive}
+                    className={`h-9 border text-[9px] uppercase font-mono tracking-wider font-semibold rounded flex items-center justify-center gap-1 transition-all ${
+                      !isAutoSimActive
+                        ? 'border-white/5 bg-neutral-900/30 text-white/20'
+                        : 'border-rose-500/30 bg-rose-500/10 text-rose-400 hover:bg-rose-500/20'
+                    }`}
+                    id="btn-time-pause"
+                    title="Pause ongoing automatic damage logs"
+                  >
+                    <Pause className="w-2.5 h-2.5 text-rose-400 fill-rose-400" />
+                    <span>Pause</span>
+                  </button>
+                  <button
+                    onClick={injectRadiationDamage}
+                    disabled={isStormActive || isAutoSimActive}
+                    className="h-9 border border-white/10 bg-[#070708]/50 hover:bg-white/5 text-[9px] uppercase font-mono tracking-wider font-semibold rounded flex items-center justify-center gap-1 transition-all text-white/60 hover:text-white disabled:opacity-30"
+                    id="btn-time-step"
+                    title="Trigger single random damage tick"
+                  >
+                    <Activity className="w-2.5 h-2.5 text-cyan-400" />
+                    <span>Step Tick</span>
+                  </button>
+                </div>
+                <span className="text-[9px] text-white/30 font-mono block">Adjust cycle rate of radiation storms or trigger manual stepping logs.</span>
+              </div>
+
             </div>
 
             {/* Bottom portion preset scenarios configured as Gold warning override module */}
@@ -627,6 +726,49 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Standard Validation Test suites buttons */}
+              <div className="space-y-1.5 pt-1.5 border-t border-white/5">
+                <span className="text-[9px] text-[#94a3b8] font-mono uppercase block">Standard Aerospace Test Suites</span>
+                <div className="grid grid-cols-4 gap-1">
+                  <button
+                    onClick={() => triggerStandardErrorCase('mild')}
+                    disabled={isStormActive}
+                    className="py-1 bg-white/[0.04] hover:bg-white/10 active:bg-white/20 border border-white/5 rounded text-[8px] font-mono uppercase text-white/70"
+                    title="Stochastic Mild damage (5% node failures)"
+                    id="btn-std-mild"
+                  >
+                    Mild 5%
+                  </button>
+                  <button
+                    onClick={() => triggerStandardErrorCase('moderate')}
+                    disabled={isStormActive}
+                    className="py-1 bg-white/[0.04] hover:bg-white/10 active:bg-white/20 border border-white/5 rounded text-[8px] font-mono uppercase text-white/70"
+                    title="Stochastic Moderate damage (15% node failures)"
+                    id="btn-std-moderate"
+                  >
+                    Mod 15%
+                  </button>
+                  <button
+                    onClick={() => triggerStandardErrorCase('severe')}
+                    disabled={isStormActive}
+                    className="py-1 bg-white/[0.04] hover:bg-white/10 active:bg-white/20 border border-white/5 rounded text-[8px] font-mono uppercase text-white/70"
+                    title="Stochastic Severe damage (30% node failures)"
+                    id="btn-std-severe"
+                  >
+                    Sev 30%
+                  </button>
+                  <button
+                    onClick={() => triggerStandardErrorCase('catastrophic')}
+                    disabled={isStormActive}
+                    className="py-1 bg-red-950/20 hover:bg-red-900/30 active:bg-red-900/50 border border-red-500/10 rounded text-[8px] font-mono uppercase text-red-300"
+                    title="Stochastic Catastrophic damage (50% node failures)"
+                    id="btn-std-catastrophic"
+                  >
+                    Cat 50%
+                  </button>
+                </div>
+              </div>
+
               <div className="grid grid-cols-2 gap-2 pt-1.5">
                 <button
                   onClick={injectRadiationDamage}
@@ -663,12 +805,24 @@ export default function App() {
             coverageSelfHealing={currentCoverage.selfHealing}
             coverageConventional={currentCoverage.conventional}
             connectivitySelfHealing={reconnectionRate}
-            connectivityConventional={reconnectionRate * 0.76} // drops faster in static comparative
+            connectivityConventional={benchmarkResults[0].connectivity}
             recoveryEfficiency={recoveryEfficiency}
             faultToleranceIndex={faultToleranceIndex}
             history={history}
             totalNodesCount={nodes.length}
             activeNodesCount={activeSensingNodes}
+            nodes={healedNodes}
+            edges={healedEdges}
+            pdrSelfHealing={benchmarkResults[4].pdr}
+            pdrConventional={benchmarkResults[0].pdr}
+            energySelfHealing={benchmarkResults[4].energy}
+            energyConventional={benchmarkResults[0].energy}
+            latencySelfHealing={benchmarkResults[4].recoveryTime}
+            benchmarkResults={benchmarkResults}
+            degradationPoints={degradationPoints}
+            onTriggerMonteCarlo={handleTriggerMonteCarlo}
+            monteCarloReport={monteCarloReport}
+            isMonteCarloRunning={isMonteCarloRunning}
           />
         </section>
 
@@ -687,35 +841,6 @@ export default function App() {
         </div>
         <span>Designation: ATLAS-VII SECTOR C</span>
       </footer>
-
-      {/* Onboarding tour walk-through */}
-      <OnboardingTour
-        isOpen={isTourOpen}
-        onClose={() => setIsTourOpen(false)}
-        onComplete={() => {
-          setIsTourOpen(false);
-          // Unlock achievement
-          if (activeProfile) {
-            triggerXPEarned(0, 'onboarding_clear');
-          }
-        }}
-        currentStepIndex={tourStepIndex}
-        setCurrentStepIndex={setTourStepIndex}
-      />
-
-      {/* Dynamic Floating Achievement Toast Banner */}
-      {unlockedToast && (
-        <div className="fixed top-24 right-6 bg-black/95 border-2 border-[#d4af37] text-white rounded-lg p-4 shadow-2xl z-50 flex items-center gap-3 animate-bounce shadow-amber-500/10 max-w-sm" style={{ pointerEvents: 'auto' }}>
-          <div className="w-10 h-10 rounded-full bg-[#d4af37]/20 border border-[#d4af37]/45 flex items-center justify-center text-xl">
-            {unlockedToast.badge}
-          </div>
-          <div>
-            <span className="text-[9px] font-mono uppercase tracking-[0.2em] text-[#d4af37] block font-bold">🎖️ MEDAL UNLOCKED 🎖️</span>
-            <h4 className="text-xs font-bold font-mono text-white leading-tight">{unlockedToast.title}</h4>
-            <span className="text-[10px] font-mono text-emerald-400 font-semibold block mt-0.5 animate-pulse">+{unlockedToast.xp} XP LEVEL AWARD</span>
-          </div>
-        </div>
-      )}
 
     </div>
   );
